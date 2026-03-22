@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+﻿import { useState, useEffect, useRef } from "react";
 import { callAI, analyzeNotesWithAI, parseJSON, generateFormulaSheet, generateLearningResources } from "./aiService.js";
 import { MUSIC_BY_MOOD, AFTER_STUDY_MUSIC } from "./musicData.js";
 import { getCurrentUser, signOut } from "./auth.js";
