@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { callAI, analyzeNotesWithAI, parseJSON } from "./aiService.js";
+import { callAI, analyzeNotesWithAI, parseJSON, generateFormulaSheet, generateLearningResources } from "./aiService.js";
 import { MUSIC_BY_MOOD, AFTER_STUDY_MUSIC } from "./musicData.js";
+import { getCurrentUser, signOut } from "./auth.js";
+import Robot from "./Robot.jsx";
+import AuthScreen from "./AuthScreen.jsx";
 
 // ─────────────────────────────────────────────
 //  Constants
@@ -64,7 +67,25 @@ export default function App() {
   const [musicTab, setMusicTab] = useState("during");
 
   // Plan detail tab
-  const [planTab, setPlanTab] = useState("plan"); // plan | analysis | music
+  const [planTab, setPlanTab] = useState("plan"); // plan | analysis | music | formulas | resources
+
+  // Learning Style
+  const [learningStyle, setLearningStyle] = useState(null); // visual | reading | practice
+
+  // Formula Sheet
+  const [formulaSheet, setFormulaSheet]     = useState(null);
+  const [loadingFormulas, setLoadingFormulas] = useState(false);
+
+  // Learning Resources
+  const [learningResources, setLearningResources] = useState(null);
+  const [loadingResources, setLoadingResources]   = useState(false);
+
+  // Auth
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Robot feature tips
+  const [featureTip, setFeatureTip] = useState(null);
 
   const totalHours = daysLeft * hoursPerDay;
 
@@ -75,6 +96,9 @@ export default function App() {
       const sub = localStorage.getItem("subjects");     if (sub) setSubjects(JSON.parse(sub));
       const prov = localStorage.getItem("aiProvider");  if (prov) setAiProvider(prov);
     } catch {}
+    const user = getCurrentUser();
+    setCurrentUser(user);
+    setAuthChecked(true);
   }, []);
 
   useEffect(() => {
@@ -140,6 +164,37 @@ export default function App() {
     setUploadedFiles(updated);
     if (!updated.length) setFileAnalysis(null);
     else if (activeKey) runFileAnalysis(updated);
+  };
+
+  // ── Formula Sheet ──
+  const buildFormulaSheet = async (analysis) => {
+    if (!activeKey) return;
+    setLoadingFormulas(true);
+    try {
+      const topics   = [...(analysis?.keyTopics || []), ...(analysis?.suggestedTopicsToRevise || [])];
+      const subjs    = analysis?.detectedSubjects?.length ? analysis.detectedSubjects : subjects;
+      const raw      = analysis?.importantFormulas || [];
+      const result   = await generateFormulaSheet(aiProvider, activeKey, topics, subjs, raw);
+      setFormulaSheet(result);
+    } catch (e) {
+      console.error("Formula sheet failed:", e.message);
+    }
+    setLoadingFormulas(false);
+  };
+
+  // ── Learning Resources ──
+  const fetchResources = async (style, analysis) => {
+    if (!activeKey || !style) return;
+    setLoadingResources(true);
+    try {
+      const topics   = [...(analysis?.keyTopics || []), ...(analysis?.suggestedTopicsToRevise || [])].slice(0, 8);
+      const subs     = analysis?.detectedSubjects || subjects;
+      const result   = await generateLearningResources(aiProvider, activeKey, topics, subs, style);
+      setLearningResources(result);
+    } catch (e) {
+      console.error("Resources failed:", e.message);
+    }
+    setLoadingResources(false);
   };
 
   // ── Generate Plan ──
@@ -247,6 +302,16 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
         readiness: plan.examReadiness,
         date: new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }),
       });
+
+      // Kick off formula sheet + resources in background
+      const analysisCtx = fileAnalysis || {
+        keyTopics: subjects,
+        detectedSubjects: subjects,
+        importantFormulas: [],
+        suggestedTopicsToRevise: subjects,
+      };
+      buildFormulaSheet(analysisCtx);
+      if (learningStyle) fetchResources(learningStyle, analysisCtx);
     } catch (e) {
       setApiError(`Plan generation failed: ${e.message}`);
       setStudyPlan(null);
@@ -281,6 +346,10 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
 
   const readinessColor = { Low: "#EF4444", Medium: "#F59E0B", High: "#10B981", Critical: "#8B5CF6" };
 
+  // ── Auth gate ──
+  if (!authChecked) return null;
+  if (!currentUser) return <AuthScreen onAuth={(user) => setCurrentUser(user)} />;
+
   return (
     <>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
@@ -290,10 +359,19 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
         input[type=number]::-webkit-inner-spin-button { opacity: 1; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        @keyframes spin  { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes fillBar { from{width:0} to{width:var(--w)} }
+        @keyframes spin      { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+        @keyframes pulse     { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        @keyframes fillBar   { from{width:0} to{width:var(--w)} }
+        @keyframes robotFloat  { 0%,100%{transform:translateY(0px) rotate(0deg)} 40%{transform:translateY(-7px) rotate(-1deg)} 70%{transform:translateY(-4px) rotate(1deg)} }
+        @keyframes antennaPulse{ 0%,100%{box-shadow:0 0 4px #8B5CF6,0 0 8px rgba(139,92,246,0.4);opacity:1} 50%{box-shadow:0 0 12px #8B5CF6,0 0 24px rgba(139,92,246,0.7);opacity:0.8} }
+        @keyframes chestScan   { 0%{transform:translateY(-15px);opacity:0} 50%{opacity:1} 100%{transform:translateY(15px);opacity:0} }
+        @keyframes bubblePop   { 0%{transform:scale(0.85) translateY(8px);opacity:0} 100%{transform:scale(1) translateY(0);opacity:1} }
         a { color: inherit; text-decoration: none; }
+        @media print {
+          body { background: #fff !important; color: #000 !important; }
+          nav, button, .no-print { display: none !important; }
+          * { background: transparent !important; color: #000 !important; border-color: #ccc !important; box-shadow: none !important; }
+        }
       `}</style>
 
       <div style={S.app}>
@@ -369,7 +447,10 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
 
                 {/* Mood */}
                 <div style={S.card}>
-                  <p style={{ fontWeight: "700", fontSize: "13px", margin: "0 0 10px" }}>😊 How are you feeling today?</p>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                    <p style={{ fontWeight: "700", fontSize: "13px", margin: 0 }}>😊 How are you feeling today?</p>
+                    <button onClick={() => setFeatureTip("mood")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", color: "#64748b" }}>ℹ️</button>
+                  </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "6px" }}>
                     {MOODS.map(mood => (
                       <div key={mood.id} style={{ ...S.moodCard(mood.id), padding: "10px 4px" }} onClick={() => setSelectedMood(mood.id)}>
@@ -410,7 +491,10 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
                       <p style={{ margin: 0, fontWeight: "700", fontSize: "13px" }}>📎 Upload Notes (optional)</p>
                       <p style={{ margin: "2px 0 0", color: "#64748b", fontSize: "11px" }}>AI reads your files → smarter plan</p>
                     </div>
-                    {uploadedFiles.length > 0 && <span style={S.tag(accent)}>✓ {uploadedFiles.length} file{uploadedFiles.length > 1 ? "s" : ""}</span>}
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      {uploadedFiles.length > 0 && <span style={S.tag(accent)}>✓ {uploadedFiles.length} file{uploadedFiles.length > 1 ? "s" : ""}</span>}
+                      <button onClick={() => setFeatureTip("files")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", color: "#64748b" }}>ℹ️</button>
+                    </div>
                   </div>
 
                   {uploadedFiles.length === 0 ? (
@@ -475,6 +559,36 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
                   <textarea style={{ ...S.input, minHeight: "60px", resize: "vertical" }} placeholder="e.g. weak in calculus, haven't started organic chemistry..." value={notes} onChange={e => setNotes(e.target.value)} />
                 </div>
 
+                {/* Learning Style Selector */}
+                <div style={S.card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                    <p style={{ fontWeight: "700", fontSize: "13px", margin: 0 }}>🧠 How do you learn best?</p>
+                    <button onClick={() => setFeatureTip("learningStyle")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", color: "#64748b" }}>ℹ️</button>
+                  </div>
+                  <p style={{ color: "#64748b", fontSize: "11px", margin: "0 0 10px" }}>AI will find the right resources for your style</p>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                    {[
+                      { id: "visual",   emoji: "🎬", label: "Visual",   desc: "Videos & animations" },
+                      { id: "reading",  emoji: "📖", label: "Reading",  desc: "Textbooks & notes" },
+                      { id: "practice", emoji: "✏️", label: "Practice", desc: "Problems & quizzes" },
+                    ].map(s => (
+                      <div key={s.id}
+                        onClick={() => setLearningStyle(learningStyle === s.id ? null : s.id)}
+                        style={{
+                          padding: "10px 6px", borderRadius: "10px", textAlign: "center", cursor: "pointer",
+                          border: `1.5px solid ${learningStyle === s.id ? accent : "rgba(255,255,255,0.08)"}`,
+                          background: learningStyle === s.id ? `${accent}18` : "rgba(255,255,255,0.03)",
+                          transition: "all 0.2s",
+                        }}>
+                        <div style={{ fontSize: "20px", marginBottom: "3px" }}>{s.emoji}</div>
+                        <div style={{ fontWeight: "700", fontSize: "11px", color: learningStyle === s.id ? accent : "#e2e8f0" }}>{s.label}</div>
+                        <div style={{ color: "#64748b", fontSize: "10px" }}>{s.desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {learningStyle && <p style={{ color: accent, fontSize: "11px", margin: "8px 0 0", textAlign: "center" }}>✓ {learningStyle === "visual" ? "YouTube videos" : learningStyle === "reading" ? "Textbooks & articles" : "Practice problems"} will be curated after plan generation</p>}
+                </div>
+
                 <button
                   style={{ ...S.btn(accent), opacity: (selectedMood && !analyzingFile) ? 1 : 0.4, cursor: (selectedMood && !analyzingFile) ? "pointer" : "not-allowed" }}
                   onClick={generatePlan}
@@ -520,10 +634,12 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
                     )}
 
                     {/* Plan Tabs */}
-                    <div style={{ display: "flex", gap: "6px", marginBottom: "14px", background: "rgba(255,255,255,0.04)", borderRadius: "12px", padding: "4px" }}>
-                      <button style={S.tabBtn(planTab === "plan")}     onClick={() => setPlanTab("plan")}>📅 Day Plan</button>
-                      <button style={S.tabBtn(planTab === "analysis")} onClick={() => setPlanTab("analysis")}>📊 Analysis</button>
-                      <button style={S.tabBtn(planTab === "music")}    onClick={() => setPlanTab("music")}>🎵 Music</button>
+                    <div style={{ display: "flex", gap: "4px", marginBottom: "14px", background: "rgba(255,255,255,0.04)", borderRadius: "12px", padding: "4px", flexWrap: "wrap" }}>
+                      <button style={S.tabBtn(planTab === "plan")}      onClick={() => setPlanTab("plan")}>📅 Plan</button>
+                      <button style={S.tabBtn(planTab === "analysis")}  onClick={() => setPlanTab("analysis")}>📊 Analysis</button>
+                      <button style={S.tabBtn(planTab === "formulas")}  onClick={() => setPlanTab("formulas")}>🧪 Formulas</button>
+                      {learningStyle && <button style={S.tabBtn(planTab === "resources")} onClick={() => setPlanTab("resources")}>📚 Resources</button>}
+                      <button style={S.tabBtn(planTab === "music")}     onClick={() => setPlanTab("music")}>🎵 Music</button>
                     </div>
 
                     {/* ── TAB: DAY PLAN ── */}
@@ -639,6 +755,116 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
                           </div>
                         )}
                       </>
+                    )}
+
+                    {/* ── TAB: FORMULA SHEET ── */}
+                    {planTab === "formulas" && (
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                          <div>
+                            <h3 style={{ fontFamily: "'Syne', sans-serif", fontSize: "18px", fontWeight: "800", margin: "0 0 2px" }}>🧪 Formula Sheet</h3>
+                            <p style={{ color: "#64748b", fontSize: "12px", margin: 0 }}>AI-extracted cheat sheet from your topics</p>
+                          </div>
+                          {formulaSheet?.formulas?.length > 0 && (
+                            <button onClick={() => window.print()} style={{ ...S.btn(accent, "outline"), width: "auto", padding: "8px 14px", fontSize: "12px" }}>🖨️ Print</button>
+                          )}
+                        </div>
+
+                        {loadingFormulas ? (
+                          <div style={{ ...S.card, textAlign: "center", padding: "30px" }}>
+                            <div style={{ fontSize: "30px", marginBottom: "10px", animation: "spin 2s linear infinite", display: "inline-block" }}>🧮</div>
+                            <p style={{ color: "#64748b", margin: 0 }}>Extracting formulas from your topics...</p>
+                          </div>
+                        ) : formulaSheet?.formulas?.length > 0 ? (
+                          <>
+                            {/* Group by subject */}
+                            {[...new Set(formulaSheet.formulas.map(f => f.subject))].map(subj => (
+                              <div key={subj}>
+                                <p style={{ color: accent, fontWeight: "700", fontSize: "11px", textTransform: "uppercase", letterSpacing: "1.5px", margin: "16px 0 8px" }}>{subj}</p>
+                                {formulaSheet.formulas.filter(f => f.subject === subj).map((f, i) => (
+                                  <div key={i} style={{ ...S.card, borderLeft: `3px solid ${accent}`, marginBottom: "8px" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px" }}>
+                                      <p style={{ margin: 0, fontWeight: "700", fontSize: "12px", color: "#e2e8f0" }}>{f.name}</p>
+                                    </div>
+                                    <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: "8px", padding: "10px 14px", marginBottom: "6px", fontFamily: "monospace", fontSize: "16px", fontWeight: "700", color: accent, letterSpacing: "0.5px" }}>
+                                      {f.formula}
+                                    </div>
+                                    {f.variables && <p style={{ margin: "0 0 4px", color: "#94a3b8", fontSize: "11px" }}>📐 {f.variables}</p>}
+                                    {f.tip && <p style={{ margin: 0, color: "#64748b", fontSize: "11px", fontStyle: "italic" }}>💡 {f.tip}</p>}
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </>
+                        ) : (
+                          <div style={{ ...S.card, textAlign: "center", padding: "30px" }}>
+                            <p style={{ fontSize: "32px", marginBottom: "10px" }}>📭</p>
+                            <p style={{ color: "#64748b", margin: 0 }}>No formulas generated yet. Upload notes or generate a plan first.</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* ── TAB: LEARNING RESOURCES ── */}
+                    {planTab === "resources" && learningStyle && (
+                      <div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <h3 style={{ fontFamily: "'Syne', sans-serif", fontSize: "18px", fontWeight: "800", margin: "0 0 2px" }}>
+                            {learningStyle === "visual" ? "🎬" : learningStyle === "reading" ? "📖" : "✏️"} {learningStyle === "visual" ? "Video" : learningStyle === "reading" ? "Reading" : "Practice"} Resources
+                          </h3>
+                          <p style={{ color: "#64748b", fontSize: "12px", margin: 0 }}>Curated for your {learningStyle} learning style</p>
+                        </div>
+
+                        {/* Style switcher */}
+                        <div style={{ display: "flex", gap: "6px", marginBottom: "14px" }}>
+                          {[["visual","🎬","Videos"],["reading","📖","Reading"],["practice","✏️","Practice"]].map(([id, em, label]) => (
+                            <button key={id} style={{ ...S.tabBtn(learningStyle === id), flex: 1 }} onClick={() => { setLearningStyle(id); setLearningResources(null); fetchResources(id, fileAnalysis || { keyTopics: subjects, detectedSubjects: subjects }); }}>{em} {label}</button>
+                          ))}
+                        </div>
+
+                        {learningResources?.styleAdvice && (
+                          <div style={{ ...S.card, borderColor: `${accent}44`, background: `${accent}08`, marginBottom: "12px" }}>
+                            <p style={{ margin: 0, color: accent, fontSize: "12px", fontStyle: "italic" }}>💡 {learningResources.styleAdvice}</p>
+                          </div>
+                        )}
+
+                        {loadingResources ? (
+                          <div style={{ ...S.card, textAlign: "center", padding: "30px" }}>
+                            <div style={{ fontSize: "30px", marginBottom: "10px", animation: "spin 2s linear infinite", display: "inline-block" }}>
+                              {learningStyle === "visual" ? "🎬" : learningStyle === "reading" ? "📖" : "✏️"}
+                            </div>
+                            <p style={{ color: "#64748b", margin: 0 }}>Finding the best {learningStyle} resources for your topics...</p>
+                          </div>
+                        ) : learningResources?.resources?.length > 0 ? (
+                          <>
+                            {[...new Set(learningResources.resources.map(r => r.subject))].map(subj => (
+                              <div key={subj}>
+                                <p style={{ color: accent, fontWeight: "700", fontSize: "11px", textTransform: "uppercase", letterSpacing: "1.5px", margin: "16px 0 8px" }}>{subj}</p>
+                                {learningResources.resources.filter(r => r.subject === subj).map((r, i) => (
+                                  <a key={i} href={r.url} target="_blank" rel="noopener noreferrer" style={{ display: "block", textDecoration: "none", ...S.card, cursor: "pointer", marginBottom: "8px", borderLeft: `3px solid ${accent}` }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "4px" }}>
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <p style={{ margin: "0 0 2px", fontWeight: "700", fontSize: "12px", color: "#e2e8f0" }}>
+                                          {r.type === "youtube" ? "▶️" : r.type === "practice" ? "✏️" : "📄"} {r.title}
+                                        </p>
+                                        <p style={{ margin: "0 0 4px", color: "#64748b", fontSize: "11px" }}>{r.topic}</p>
+                                      </div>
+                                      <span style={{ ...S.tag(accent), marginLeft: "8px", flexShrink: 0 }}>{r.difficulty}</span>
+                                    </div>
+                                    <p style={{ margin: 0, color: "#94a3b8", fontSize: "11px" }}>{r.description}</p>
+                                    <p style={{ margin: "4px 0 0", color: accent, fontSize: "11px" }}>Open ↗</p>
+                                  </a>
+                                ))}
+                              </div>
+                            ))}
+                          </>
+                        ) : (
+                          <div style={{ ...S.card, textAlign: "center", padding: "30px" }}>
+                            <p style={{ fontSize: "32px", marginBottom: "10px" }}>📭</p>
+                            <p style={{ color: "#64748b", margin: 0 }}>No resources yet. Generate your plan first.</p>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* ── TAB: MUSIC ── */}
@@ -832,12 +1058,34 @@ ${fileAnalysis ? "- Prioritize weak areas and uncovered topics in the daily plan
                   <p style={{ margin: "0 0 3px", fontWeight: "600", fontSize: "13px", color: "#F59E0B" }}>🔒 Privacy</p>
                   <p style={{ color: "#94a3b8", fontSize: "12px", margin: 0, lineHeight: "1.6" }}>Keys are in-memory only. Cleared when you close the tab. Never stored on any server.</p>
                 </div>
+
+                {/* Account */}
+                <div style={S.card}>
+                  <p style={{ margin: "0 0 10px", fontWeight: "600", fontSize: "13px", color: "#94a3b8" }}>👤 Account</p>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <p style={{ margin: "0 0 2px", fontWeight: "700", fontSize: "14px" }}>@{currentUser.username}</p>
+                      <p style={{ margin: 0, color: "#64748b", fontSize: "12px" }}>Signed in on this device</p>
+                    </div>
+                    <button
+                      onClick={() => { signOut(); setCurrentUser(null); }}
+                      style={{ ...S.btn("#EF4444", "outline"), width: "auto", padding: "8px 16px", fontSize: "12px" }}
+                    >Sign Out</button>
+                  </div>
+                </div>
               </div>
             )}
 
           </div>
         </div>
       </div>
+
+      {/* ── StudyBot Robot ── */}
+      <Robot
+        currentUser={currentUser}
+        featureTip={featureTip}
+        setFeatureTip={setFeatureTip}
+      />
     </>
   );
 }

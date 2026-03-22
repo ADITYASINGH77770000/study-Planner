@@ -165,6 +165,26 @@ export async function callGemini(apiKey, prompt, modelIndex = 0) {
 // ─────────────────────────────────────────────
 //  Unified call — picks provider
 // ─────────────────────────────────────────────
+// ── Gemini with multipart (base64 files + text) ──
+export async function callGeminiMultipart(apiKey, parts, modelIndex = 0) {
+  const model = GEMINI_MODELS[modelIndex] || GEMINI_MODELS[0];
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents: [{ parts }] }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    if ((res.status === 429 || res.status === 503) && modelIndex + 1 < GEMINI_MODELS.length) {
+      return callGeminiMultipart(apiKey, parts, modelIndex + 1);
+    }
+    throw new Error(`Gemini API error: ${res.status} — ${errText}`);
+  }
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
+
 export async function callAI(provider, apiKey, prompt, systemPrompt = "", contentParts = null) {
   if (provider === "gemini") {
     const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
@@ -214,22 +234,104 @@ Use short values — keep each string under 80 characters to avoid truncation.
     return parseJSON(result);
 
   } else {
-    let combined = "";
+    // Gemini supports inline base64 for PDFs and images
+    const parts = [];
     for (const file of files) {
       if (file.type === "text/plain" || file.name.endsWith(".txt")) {
         const text = await file.text();
-        // Limit text to 3000 chars to avoid token overflow
-        combined += `\n\nFile: ${file.name}\n${text.slice(0, 3000)}`;
+        parts.push({ text: `File: ${file.name}\n${text.slice(0, 3000)}` });
+      } else if (file.type === "application/pdf" || file.type.startsWith("image/")) {
+        const base64 = await fileToBase64(file);
+        parts.push({ inline_data: { mime_type: file.type, data: base64 } });
+        parts.push({ text: `(Above file is: ${file.name})` });
       } else {
-        combined += `\n\n[File: ${file.name} — ${(file.size / 1024).toFixed(0)}KB, type: ${file.type}]`;
+        parts.push({ text: `[File: ${file.name} — ${(file.size / 1024).toFixed(0)}KB, unsupported type: ${file.type}]` });
       }
     }
+    parts.push({ text: analysisPrompt });
 
-    const fullPrompt = `Student notes:\n${combined}\n\n${analysisPrompt}`;
     await delay(1000);
-    const result = await callGemini(apiKey, fullPrompt);
+    const result = await callGeminiMultipart(apiKey, parts);
     return parseJSON(result);
   }
+}
+
+// ─────────────────────────────────────────────
+//  Formula Sheet Builder
+// ─────────────────────────────────────────────
+export async function generateFormulaSheet(provider, apiKey, topics, subjects, rawFormulas) {
+  const prompt = `You are a study assistant. Extract and expand ALL important formulas, equations, and key facts for these topics.
+
+Subjects: ${subjects.join(", ")}
+Topics: ${topics.join(", ")}
+Already detected formulas: ${rawFormulas?.join("; ") || "none"}
+
+Return ONLY valid JSON. No markdown. No explanation. Pure JSON only.
+{
+  "formulas": [
+    {
+      "name": "Formula display name",
+      "formula": "The actual equation e.g. F = ma or E = mc²",
+      "subject": "Subject name",
+      "variables": "e.g. F=Force(N), m=mass(kg), a=acceleration(m/s²)",
+      "tip": "One short tip on when/how to use this formula"
+    }
+  ]
+}
+
+Rules:
+- Include at least 8-15 formulas covering all subjects/topics
+- Keep formula strings clean and readable (use ^ for powers, sqrt() for roots)
+- Group logically by subject
+- Keep all strings under 100 chars`;
+
+  const raw = await callAI(provider, apiKey, prompt, "You are a study formula expert. Return only JSON.");
+  return parseJSON(raw);
+}
+
+// ─────────────────────────────────────────────
+//  Learning Resources Generator
+// ─────────────────────────────────────────────
+export async function generateLearningResources(provider, apiKey, topics, subjects, learningStyle) {
+  const styleGuide = {
+    visual:   "YouTube video tutorials, animations, and visual explanations. Generate YouTube search URLs like https://www.youtube.com/results?search_query=QUERY",
+    reading:  "Textbooks, articles, PDFs and written guides. Generate Google search URLs like https://www.google.com/search?q=QUERY+notes+pdf or https://www.google.com/search?q=QUERY+textbook",
+    practice: "Practice problems, quizzes, worksheets and exercises. Generate URLs like https://www.google.com/search?q=QUERY+practice+problems or https://www.khanacademy.org/search?page_search_query=QUERY",
+  };
+
+  const prompt = `You are a study resource curator. Generate the best ${learningStyle} learning resources for these topics.
+
+Learning Style: ${learningStyle.toUpperCase()} — ${styleGuide[learningStyle]}
+Subjects: ${subjects.join(", ")}
+Topics: ${topics.join(", ")}
+
+Return ONLY valid JSON. No markdown. No explanation. Pure JSON only.
+{
+  "resources": [
+    {
+      "topic": "Exact topic name",
+      "subject": "Subject name",
+      "title": "Resource title (descriptive, not just the URL)",
+      "url": "Full URL — must be a real working search URL",
+      "type": "${learningStyle === "visual" ? "youtube" : learningStyle === "reading" ? "article" : "practice"}",
+      "description": "One sentence on what the student will get from this resource",
+      "difficulty": "Beginner / Intermediate / Advanced"
+    }
+  ],
+  "styleAdvice": "One sentence tip on how to best use ${learningStyle} learning for these subjects"
+}
+
+Rules:
+- Generate 1-2 resources per topic (cover all ${topics.length} topics)
+- URLs must be real, working search links — not made-up pages
+- For YouTube: use https://www.youtube.com/results?search_query= with a specific search query
+- For reading: use https://www.google.com/search?q= with subject+topic+notes/textbook
+- For practice: use https://www.google.com/search?q= or Khan Academy search URLs
+- Replace spaces with + in URL query parameters
+- Keep title and description under 80 chars`;
+
+  const raw = await callAI(provider, apiKey, prompt, "You are a study resource expert. Return only JSON.");
+  return parseJSON(raw);
 }
 
 // ─────────────────────────────────────────────
